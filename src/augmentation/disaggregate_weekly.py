@@ -41,9 +41,10 @@ def disaggregate_weekly(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     out_path = os.path.join(cfg["paths"]["interim"], "kaggle_weekly.csv")
 
     rows = []
+    df = df.dropna(subset=["Month"]).copy()
     for _, row in df.iterrows():
-        year = row["Month"].year
-        month = row["Month"].month
+        year = int(row["Month"].year)
+        month = int(row["Month"].month)
 
         # Build week starts for this month
         first_day = pd.Timestamp(year, month, 1)

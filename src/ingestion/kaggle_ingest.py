@@ -45,7 +45,7 @@ def load_kaggle_csv(path: str) -> pd.DataFrame:
     # Normalise column names
     df.columns = [c.strip().replace(" ", "_") for c in df.columns]
     # Parse Month column (format: YYYY-MM or Jan-YY or similar)
-    df["Month"] = pd.to_datetime(df["Month"], infer_datetime_format=True)
+    df["Month"] = pd.to_datetime(df["Month"], format="%b-%y")
     df = df.sort_values("Month").reset_index(drop=True)
     logger.info("[KAGGLE] Loaded %d rows, date range %s – %s",
                 len(df), df["Month"].min().date(), df["Month"].max().date())

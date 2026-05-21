@@ -25,38 +25,62 @@ def fetch_worldbank(cfg: dict) -> pd.DataFrame:
 
     logger.info("[ECONOMIC] Fetching World Bank indicators: %s", indicators)
     try:
-        df = wb.data.DataFrame(indicators, economy="LKA", time=years)
-        df = df.reset_index()
+        # wbgapi returns wide format: rows = economies, columns = YR2010, YR2011, ...
+        raw = wb.data.DataFrame(indicators, economy="LKA", time=years)
     except Exception as e:
         raise RuntimeError(f"[ECONOMIC] World Bank fetch failed: {e}") from e
 
-    # wbgapi returns columns as indicator codes, index as year
-    df = df.rename(columns={
-        wb_cfg["indicators"]["gdp"]:             "gdp_lka",
-        wb_cfg["indicators"]["population"]:      "population_lka",
-        wb_cfg["indicators"]["lending_rate"]:    "lending_rate",
-        wb_cfg["indicators"]["govt_consumption"]:"govt_consumption",
-        "time":                                  "year",
-        "economy":                               "economy",
-    })
-
-    # Drop economy column (only LKA)
-    df = df.drop(columns=[c for c in ["economy"] if c in df.columns], errors="ignore")
-
-    # Parse year
-    if "year" in df.columns:
-        df["year"] = df["year"].astype(str).str.extract(r"(\d{4})").astype(int)
+    # Transpose: years become rows, indicators become columns
+    # raw.columns are like 'YR2010', raw.index is indicator codes (for single economy)
+    # When multiple indicators, rows are indicators, cols are years
+    if raw.index.name == "economy":
+        # Single indicator returned — each row is one indicator
+        raw = raw.T  # years as rows, indicators as columns
+        raw.index.name = "year_str"
+        raw = raw.reset_index()
     else:
-        df = df.reset_index()
-        df["year"] = df["time"].astype(str).str.extract(r"(\d{4})").astype(int)
-        df = df.drop(columns=["time"], errors="ignore")
+        # Multiple indicators: index is (economy, indicator) or just indicator
+        raw = raw.reset_index()
+        # Melt wide → long
+        year_cols = [c for c in raw.columns if str(c).startswith("YR")]
+        id_cols = [c for c in raw.columns if not str(c).startswith("YR")]
+        raw = raw.melt(id_vars=id_cols, value_vars=year_cols, var_name="year_str", value_name="value")
 
+    # At this point we might be in melted or transposed form — handle both:
+    if "year_str" in raw.columns and "value" in raw.columns:
+        # Melted long form: pivot back to wide by indicator
+        ind_col = next((c for c in raw.columns if c not in ("year_str", "value", "economy")), None)
+        if ind_col:
+            pivot = raw.pivot_table(index="year_str", columns=ind_col, values="value", aggfunc="first")
+            pivot = pivot.reset_index()
+        else:
+            pivot = raw.copy()
+    else:
+        # Already transposed — year_str column contains 'YR2010' etc.
+        pivot = raw.copy()
+        if "year_str" not in pivot.columns and "index" in pivot.columns:
+            pivot = pivot.rename(columns={"index": "year_str"})
+
+    pivot["year"] = pivot["year_str"].astype(str).str.extract(r"(\d{4})").astype(int)
+    pivot = pivot.drop(columns=["year_str"], errors="ignore")
+
+    # Rename indicator codes to friendly names
+    ind_map = {v: k for k, v in wb_cfg["indicators"].items()}
+    friendly = {"gdp": "gdp_lka", "population": "population_lka",
+                "lending_rate": "lending_rate", "govt_consumption": "govt_consumption"}
+    rename_map = {}
+    for code, short in ind_map.items():
+        if short in friendly:
+            rename_map[code] = friendly[short]
+    pivot = pivot.rename(columns=rename_map)
+
+    df = pivot.drop(columns=["economy"], errors="ignore")
     df = df.sort_values("year").reset_index(drop=True)
 
     # Forward-fill missing years (World Bank publication lag)
     for col in ["gdp_lka", "population_lka", "lending_rate", "govt_consumption"]:
         if col in df.columns:
-            df[col] = df[col].fillna(method="ffill")
+            df[col] = df[col].ffill()
 
     # Expand annual → monthly via linear interpolation
     months = pd.date_range(
@@ -80,7 +104,7 @@ def fetch_worldbank(cfg: dict) -> pd.DataFrame:
     weekly = weekly.merge(monthly.drop(columns=["year"]), on="month_key", how="left")
     for col in ["gdp_lka", "population_lka", "lending_rate", "govt_consumption"]:
         if col in weekly.columns:
-            weekly[col] = weekly[col].fillna(method="ffill")
+            weekly[col] = weekly[col].ffill()
     weekly = weekly.drop(columns=["month_key"])
 
     os.makedirs(cfg["paths"]["raw_economic"], exist_ok=True)

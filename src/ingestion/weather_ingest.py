@@ -11,31 +11,60 @@ logger = logging.getLogger(__name__)
 HOURLY_VARS = "temperature_2m,relative_humidity_2m,precipitation,rain,cloud_cover"
 
 
-def _fetch_open_meteo(url: str, params: dict, retries: int = 3) -> pd.DataFrame:
-    """Fetch CSV from Open-Meteo and return as DataFrame."""
+def _fetch_open_meteo(url: str, params: dict, retries: int = 6) -> pd.DataFrame:
+    """Fetch CSV from Open-Meteo and return as DataFrame.
+
+    Open-Meteo CSV format:
+        Row 1: metadata column names (latitude, longitude, timezone, ...)
+        Row 2: metadata values
+        Row 3: blank
+        Row 4: data header (time, temperature_2m (°C), ...)
+        Row 5+: actual hourly data
+    We skip everything before the row starting with 'time'.
+    """
+    from io import StringIO
     for attempt in range(retries):
         try:
-            r = requests.get(url, params=params, timeout=60)
+            r = requests.get(url, params=params, timeout=120)
+            if r.status_code == 429:
+                wait = 15 * (attempt + 1)
+                logger.warning("[WEATHER] 429 rate-limit — waiting %ds", wait)
+                time.sleep(wait)
+                continue
             r.raise_for_status()
-            from io import StringIO
             lines = r.text.splitlines()
-            # Skip header comment lines (start with #)
-            data_lines = [l for l in lines if not l.startswith("#")]
+            # Find the line that is the actual data header (starts with 'time')
+            header_idx = next(
+                (i for i, l in enumerate(lines) if l.strip().lower().startswith("time")),
+                None,
+            )
+            if header_idx is None:
+                raise ValueError("No 'time' header row found in Open-Meteo response")
+            data_lines = lines[header_idx:]
             df = pd.read_csv(StringIO("\n".join(data_lines)))
             return df
         except Exception as e:
             if attempt == retries - 1:
                 raise
-            logger.warning("[WEATHER] Attempt %d failed: %s — retrying", attempt + 1, e)
-            time.sleep(2 ** attempt)
+            wait = 5 * (2 ** attempt)
+            logger.warning("[WEATHER] Attempt %d failed: %s — retrying in %ds", attempt + 1, e, wait)
+            time.sleep(wait)
 
 
 def _agg_hourly_to_weekly(df: pd.DataFrame) -> pd.DataFrame:
     """Aggregate hourly weather data to weekly (Monday-anchored)."""
-    time_col = next((c for c in df.columns if "time" in c.lower()), df.columns[0])
-    df[time_col] = pd.to_datetime(df[time_col])
+    # Strip units from column names e.g. "temperature_2m (°C)" -> "temperature_2m"
+    df.columns = [c.split(" (")[0].strip() for c in df.columns]
+
+    time_col = next((c for c in df.columns if c.lower() == "time"), df.columns[0])
+    df[time_col] = pd.to_datetime(df[time_col], format="ISO8601", utc=False)
     df = df.rename(columns={time_col: "timestamp"})
     df["week_start"] = df["timestamp"].dt.to_period("W-SUN").apply(lambda p: p.start_time.date())
+
+    # Convert all data columns to numeric
+    for col in df.columns:
+        if col not in ("timestamp", "week_start"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     agg = {}
     for col in df.columns:
@@ -50,15 +79,16 @@ def _agg_hourly_to_weekly(df: pd.DataFrame) -> pd.DataFrame:
     # Rename columns to standard names
     rename = {}
     for c in weekly.columns:
-        if "precipitation" in c:
+        cl = c.lower()
+        if "precipitation" in cl:
             rename[c] = "precip_sum"
-        elif "rain" in c:
+        elif cl == "rain":
             rename[c] = "rain_sum"
-        elif "temperature" in c:
+        elif "temperature" in cl:
             rename[c] = "temp_mean"
-        elif "relative_humidity" in c:
+        elif "relative_humidity" in cl:
             rename[c] = "humidity_mean"
-        elif "cloud_cover" in c:
+        elif "cloud_cover" in cl:
             rename[c] = "cloud_cover_mean"
     weekly = weekly.rename(columns=rename)
     weekly["week_start"] = pd.to_datetime(weekly["week_start"])
@@ -136,13 +166,22 @@ def fetch_all_depots_weather(cfg: dict, tier: str = "all") -> None:
     os.makedirs(out_dir, exist_ok=True)
 
     depots = cfg["depots"]
+    failed = []
     for depot in depots:
         out_path = os.path.join(out_dir, f"{depot['name'].lower().replace(' ', '_')}.csv")
         if tier == "all" and os.path.exists(out_path):
             logger.info("[WEATHER] Already exists, skipping: %s", out_path)
             continue
         logger.info("[WEATHER] Fetching depot: %s", depot["name"])
-        df = fetch_depot_weather(depot, cfg, tier=tier)
-        df.to_csv(out_path, index=False)
-        logger.info("[WEATHER] Saved %d weekly rows -> %s", len(df), out_path)
-        time.sleep(0.5)  # gentle rate limiting
+        try:
+            df = fetch_depot_weather(depot, cfg, tier=tier)
+            df.to_csv(out_path, index=False)
+            logger.info("[WEATHER] Saved %d weekly rows -> %s", len(df), out_path)
+        except Exception as e:
+            logger.warning("[WEATHER] Failed for depot %s (skipping): %s", depot["name"], e)
+            failed.append(depot["name"])
+        time.sleep(3)  # respect Open-Meteo rate limits (3 req/s free tier)
+
+    if failed:
+        logger.warning("[WEATHER] %d depots failed and will have no weather data: %s",
+                       len(failed), failed)
