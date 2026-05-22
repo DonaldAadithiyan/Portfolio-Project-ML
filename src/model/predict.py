@@ -39,8 +39,6 @@ def _build_feature_row(
     Construct a single feature row for inference from recent demand_panel rows.
     recent_panel: last 52 rows for this depot, sorted ascending by week_start.
     """
-    from src.features.build_features import _get_feature_cols
-
     # We need to assemble the same feature vector the model was trained on.
     # The lag features are computed from the tail of recent_panel.
     panel = recent_panel.sort_values("week_start").copy()
@@ -70,7 +68,7 @@ def _build_feature_row(
     # Weather/economic/calendar from last row (same-week context)
     carry_cols = [
         "precip_sum", "rain_sum", "temp_mean", "humidity_mean", "cloud_cover_mean",
-        "gdp_lka", "lending_rate", "cbsl_pmi_construction", "govt_consumption",
+        "gdp_lka", "lending_rate", "govt_consumption",
         "is_sw_monsoon", "is_ne_monsoon", "is_dry_season",
         "is_sinhala_tamil_new_year", "is_vesak", "is_christmas_week",
         "post_holiday_lag_1", "post_holiday_lag_2", "is_year_end_quarter",
@@ -118,7 +116,8 @@ def forecast_depot(
     for h in cfg["model"]["horizons"]:
         model = _models[h]
         try:
-            pred = float(model.predict(X)[0])
+            feat_names = list(model.feature_names_in_)
+            pred = float(model.predict(X[feat_names])[0])
         except Exception as e:
             logger.warning("[PREDICT] horizon=%d predict failed: %s", h, e)
             pred = 0.0

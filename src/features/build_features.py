@@ -132,15 +132,26 @@ def rebuild_lag_features_for_depots(depots: list[str], cfg: dict) -> pd.DataFram
 
     sb = get_client()
 
-    # Fetch all demand panel rows
-    result = sb.table("tc_demand_panel").select(
+    # Fetch all demand panel rows with pagination (Supabase default limit is 1000)
+    select_cols = (
         "week_start,depot_id,demand_tonnes,precip_sum,rain_sum,temp_mean,"
         "humidity_mean,cloud_cover_mean,gdp_lka,lending_rate,"
         "cbsl_pmi_construction,govt_consumption,is_sw_monsoon,is_ne_monsoon,"
         "is_dry_season,is_sinhala_tamil_new_year,is_vesak,is_christmas_week,"
         "post_holiday_lag_1,post_holiday_lag_2,is_year_end_quarter,data_source"
-    ).execute()
-    df = pd.DataFrame(result.data)
+    )
+    all_rows = []
+    page_size = 1000
+    start = 0
+    while True:
+        result = sb.table("tc_demand_panel").select(select_cols).range(
+            start, start + page_size - 1
+        ).execute()
+        all_rows.extend(result.data)
+        if len(result.data) < page_size:
+            break
+        start += page_size
+    df = pd.DataFrame(all_rows)
 
     # Fetch depot id→name map and join
     depots_result = sb.table("tc_depots").select("depot_id,name").execute()

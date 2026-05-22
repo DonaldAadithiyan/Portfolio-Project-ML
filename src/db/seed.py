@@ -8,16 +8,32 @@ from src.db.db import get_client
 logger = logging.getLogger(__name__)
 
 
-def _clean(val):
-    """Convert NaN/inf to None for JSON serialisation."""
+_INT_COLS = {
+    "depot_id",
+    "is_sw_monsoon", "is_ne_monsoon", "is_dry_season",
+    "is_sinhala_tamil_new_year", "is_vesak", "is_christmas_week",
+    "post_holiday_lag_1", "post_holiday_lag_2", "is_year_end_quarter",
+}
+
+
+def _clean(val, col: str = ""):
+    """Convert NaN/inf to None; cast integer columns to int for JSON serialisation."""
     if val is None:
         return None
     try:
-        if math.isnan(val) or math.isinf(val):
+        if math.isnan(float(val)):
             return None
     except (TypeError, ValueError):
         pass
-    return val
+    if col in _INT_COLS:
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return val
 
 
 def seed_depots(depots_cfg: list[dict]) -> dict[str, int]:
@@ -51,6 +67,8 @@ def seed_demand_panel(panel_path: str, depot_map: dict[str, int]) -> int:
     if len(missing):
         raise ValueError(f"Unknown depots in panel: {missing}")
 
+    df = df.drop_duplicates(subset=["depot_id", "week_start"], keep="last")
+
     col_order = [
         "depot_id", "week_start", "demand_tonnes", "sales_tonnes", "production_tonnes",
         "precip_sum", "rain_sum", "temp_mean", "humidity_mean", "cloud_cover_mean",
@@ -71,8 +89,10 @@ def seed_demand_panel(panel_path: str, depot_map: dict[str, int]) -> int:
             val = row[col]
             if col == "week_start":
                 rec[col] = val.date().isoformat() if hasattr(val, "date") else str(val)
+            elif not pd.notna(val):
+                rec[col] = None
             else:
-                rec[col] = _clean(float(val) if pd.notna(val) else None)
+                rec[col] = _clean(val, col)
         records.append(rec)
 
     batch_size = 500

@@ -26,8 +26,12 @@ def _get_feature_cols(df: pd.DataFrame, cfg: dict) -> list[str]:
         "week_start", "depot", "demand_tonnes", "data_source",
         "sales_tonnes", "production_tonnes",
     }
-    # Also exclude raw sales/production even if renamed
-    cols = [c for c in df.columns if c not in exclude and not c.startswith("Unnamed")]
+    cols = [
+        c for c in df.columns
+        if c not in exclude
+        and not c.startswith("Unnamed")
+        and df[c].notna().any()  # drop columns that are entirely NaN
+    ]
     return cols
 
 
