@@ -1,7 +1,8 @@
 -- Tokyo Cement Demand Forecasting — Database Schema
--- Idempotent: safe to run multiple times (CREATE TABLE IF NOT EXISTS)
+-- Tables prefixed with tc_ to avoid conflicts with existing project tables.
+-- Run once in the Supabase SQL editor: https://supabase.com/dashboard → SQL Editor
 
-CREATE TABLE IF NOT EXISTS depots (
+CREATE TABLE IF NOT EXISTS tc_depots (
     depot_id     SERIAL PRIMARY KEY,
     name         VARCHAR(100) NOT NULL UNIQUE,
     district     VARCHAR(100),
@@ -12,9 +13,9 @@ CREATE TABLE IF NOT EXISTS depots (
     created_at   TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS demand_panel (
+CREATE TABLE IF NOT EXISTS tc_demand_panel (
     id                        SERIAL PRIMARY KEY,
-    depot_id                  INTEGER REFERENCES depots(depot_id),
+    depot_id                  INTEGER REFERENCES tc_depots(depot_id),
     week_start                DATE NOT NULL,
     demand_tonnes             NUMERIC(10,2),
     sales_tonnes              NUMERIC(10,2),
@@ -41,9 +42,9 @@ CREATE TABLE IF NOT EXISTS demand_panel (
     UNIQUE (depot_id, week_start)
 );
 
-CREATE TABLE IF NOT EXISTS forecasts (
+CREATE TABLE IF NOT EXISTS tc_forecasts (
     id               SERIAL PRIMARY KEY,
-    depot_id         INTEGER REFERENCES depots(depot_id),
+    depot_id         INTEGER REFERENCES tc_depots(depot_id),
     generated_at     TIMESTAMPTZ DEFAULT NOW(),
     as_of_date       DATE NOT NULL,
     horizon_weeks    SMALLINT NOT NULL,
@@ -53,9 +54,9 @@ CREATE TABLE IF NOT EXISTS forecasts (
     UNIQUE (depot_id, as_of_date, horizon_weeks)
 );
 
-CREATE TABLE IF NOT EXISTS stock_levels (
+CREATE TABLE IF NOT EXISTS tc_stock_levels (
     id              SERIAL PRIMARY KEY,
-    depot_id        INTEGER REFERENCES depots(depot_id),
+    depot_id        INTEGER REFERENCES tc_depots(depot_id),
     reported_at     TIMESTAMPTZ DEFAULT NOW(),
     week_start      DATE NOT NULL,
     stock_tonnes    NUMERIC(10,2) NOT NULL,
@@ -63,9 +64,9 @@ CREATE TABLE IF NOT EXISTS stock_levels (
     UNIQUE (depot_id, week_start)
 );
 
-CREATE TABLE IF NOT EXISTS purchase_orders (
+CREATE TABLE IF NOT EXISTS tc_purchase_orders (
     id                  SERIAL PRIMARY KEY,
-    depot_id            INTEGER REFERENCES depots(depot_id),
+    depot_id            INTEGER REFERENCES tc_depots(depot_id),
     created_at          TIMESTAMPTZ DEFAULT NOW(),
     week_start          DATE NOT NULL,
     recommended_qty     NUMERIC(10,2) NOT NULL,
@@ -73,12 +74,13 @@ CREATE TABLE IF NOT EXISTS purchase_orders (
     forecast_demand     NUMERIC(10,2),
     status              VARCHAR(20) DEFAULT 'pending',
     approved_by         VARCHAR(100),
-    approved_at         TIMESTAMPTZ
+    approved_at         TIMESTAMPTZ,
+    UNIQUE (depot_id, week_start)
 );
 
-CREATE TABLE IF NOT EXISTS alerts (
+CREATE TABLE IF NOT EXISTS tc_alerts (
     id              SERIAL PRIMARY KEY,
-    depot_id        INTEGER REFERENCES depots(depot_id),
+    depot_id        INTEGER REFERENCES tc_depots(depot_id),
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     alert_type      VARCHAR(50) NOT NULL,
     severity        VARCHAR(20) NOT NULL,
@@ -87,9 +89,9 @@ CREATE TABLE IF NOT EXISTS alerts (
     resolved_at     TIMESTAMPTZ
 );
 
-CREATE TABLE IF NOT EXISTS sales_actuals (
+CREATE TABLE IF NOT EXISTS tc_sales_actuals (
     id              SERIAL PRIMARY KEY,
-    depot_id        INTEGER REFERENCES depots(depot_id),
+    depot_id        INTEGER REFERENCES tc_depots(depot_id),
     week_start      DATE NOT NULL,
     sales_tonnes    NUMERIC(10,2) NOT NULL,
     demand_tonnes   NUMERIC(10,2),
@@ -101,7 +103,7 @@ CREATE TABLE IF NOT EXISTS sales_actuals (
     UNIQUE (depot_id, week_start)
 );
 
-CREATE TABLE IF NOT EXISTS retrain_log (
+CREATE TABLE IF NOT EXISTS tc_retrain_log (
     id                  SERIAL PRIMARY KEY,
     triggered_at        TIMESTAMPTZ DEFAULT NOW(),
     triggered_by        VARCHAR(100),
@@ -117,11 +119,11 @@ CREATE TABLE IF NOT EXISTS retrain_log (
     promoted            BOOLEAN DEFAULT FALSE
 );
 
-CREATE TABLE IF NOT EXISTS model_plots (
+CREATE TABLE IF NOT EXISTS tc_model_plots (
     id              SERIAL PRIMARY KEY,
-    retrain_id      INTEGER REFERENCES retrain_log(id),
+    retrain_id      INTEGER REFERENCES tc_retrain_log(id),
     plot_type       VARCHAR(100) NOT NULL,
-    depot_id        INTEGER REFERENCES depots(depot_id),
+    depot_id        INTEGER REFERENCES tc_depots(depot_id),
     image_data      TEXT NOT NULL,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE (retrain_id, plot_type, depot_id)

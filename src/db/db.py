@@ -1,40 +1,27 @@
 import os
 import logging
-from psycopg2 import pool
+from supabase import create_client, Client
 
 logger = logging.getLogger(__name__)
 
-_pool: pool.ThreadedConnectionPool | None = None
+_client: Client | None = None
 
 
-def get_pool() -> pool.ThreadedConnectionPool:
-    global _pool
-    if _pool is None:
-        url = os.environ["DATABASE_URL"]
-        _pool = pool.ThreadedConnectionPool(minconn=1, maxconn=10, dsn=url)
-        logger.info("[DB] Connection pool initialised")
-    return _pool
+def get_client() -> Client:
+    global _client
+    if _client is None:
+        url = os.environ["SUPABASE_URL"]
+        key = os.environ["SUPABASE_KEY"]
+        _client = create_client(url, key)
+        logger.info("[DB] Supabase client initialised")
+    return _client
 
 
-def get_conn():
-    return get_pool().getconn()
-
-
-def release_conn(conn):
-    get_pool().putconn(conn)
-
-
-def execute_sql_file(path: str) -> None:
-    conn = get_conn()
+def check_schema() -> bool:
+    """Return True if tc_depots table exists and is accessible."""
     try:
-        with open(path, "r") as f:
-            sql = f.read()
-        with conn.cursor() as cur:
-            cur.execute(sql)
-        conn.commit()
-        logger.info("[DB] Executed SQL file: %s", path)
+        sb = get_client()
+        sb.table("tc_depots").select("depot_id").limit(1).execute()
+        return True
     except Exception:
-        conn.rollback()
-        raise
-    finally:
-        release_conn(conn)
+        return False

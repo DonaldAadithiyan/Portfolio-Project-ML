@@ -90,14 +90,9 @@ def _build_feature_row(
     row["post_holiday_demand_boost"] = ph_lag1 * roll_mean4
 
     # Depot encoding (same as training — alphabetical order)
-    from src.db.db import get_conn, release_conn
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT name FROM depots ORDER BY name")
-            depot_names = [r[0] for r in cur.fetchall()]
-    finally:
-        release_conn(conn)
+    from src.db.db import get_client
+    result = get_client().table("tc_depots").select("name").order("name").execute()
+    depot_names = [r["name"] for r in result.data]
 
     depot_enc = {n: i for i, n in enumerate(depot_names)}
     row["depot_enc"] = depot_enc.get(depot_name, -1)

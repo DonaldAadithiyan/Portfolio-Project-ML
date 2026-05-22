@@ -98,10 +98,17 @@ def run_setup(cfg: dict) -> None:
     from src.features.build_features import build_features
     panel = build_features(cfg)
 
-    # Step 7: Initialise database schema
-    logger.info("[PIPELINE] Step 7/9 — Initialise database schema")
-    from src.db.db import execute_sql_file
-    execute_sql_file(cfg["db"]["schema_file"])
+    # Step 7: Verify database schema exists
+    logger.info("[PIPELINE] Step 7/9 — Verify database schema")
+    from src.db.db import check_schema
+    if not check_schema():
+        logger.error(
+            "[PIPELINE] tc_depots table not found in Supabase.\n"
+            "  → Open the Supabase SQL Editor and run: src/db/schema.sql\n"
+            "  → Then re-run: python pipeline.py --mode setup"
+        )
+        sys.exit(1)
+    logger.info("[PIPELINE] Schema OK")
 
     # Step 8: Seed depots and demand_panel
     logger.info("[PIPELINE] Step 8/9 — Seed depots and demand_panel")
@@ -134,19 +141,19 @@ def run_setup(cfg: dict) -> None:
 def run_update(cfg: dict) -> None:
     logger.info("[PIPELINE] ══ MODE: update ══")
 
-    # Step 1: Find latest week in demand_panel
-    logger.info("[PIPELINE] Step 1/5 — Query latest week in demand_panel")
-    from src.db.db import get_conn, release_conn
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT MAX(week_start) FROM demand_panel")
-            latest_week = cur.fetchone()[0]
-    finally:
-        release_conn(conn)
+    import pandas as pd
+    from src.db.db import get_client
+
+    # Step 1: Find latest week in tc_demand_panel
+    logger.info("[PIPELINE] Step 1/5 — Query latest week in tc_demand_panel")
+    sb = get_client()
+    result = sb.table("tc_demand_panel").select("week_start").order(
+        "week_start", desc=True
+    ).limit(1).execute()
+    latest_week = result.data[0]["week_start"] if result.data else None
 
     if not latest_week:
-        logger.error("[PIPELINE] demand_panel is empty. Run --mode setup first.")
+        logger.error("[PIPELINE] tc_demand_panel is empty. Run --mode setup first.")
         sys.exit(1)
     logger.info("[PIPELINE] Latest week in DB: %s", latest_week)
 
@@ -158,37 +165,28 @@ def run_update(cfg: dict) -> None:
     # Step 3: Pull any new World Bank data
     logger.info("[PIPELINE] Step 3/5 — Pull updated World Bank economic data")
     from src.ingestion.economic_ingest import fetch_worldbank
-    # Remove cached file to force refresh
     econ_path = os.path.join(cfg["paths"]["raw_economic"], "worldbank_lka.csv")
     if os.path.exists(econ_path):
         os.remove(econ_path)
     fetch_worldbank(cfg)
 
-    # Step 4: Append new rows to demand_panel
-    logger.info("[PIPELINE] Step 4/5 — Append new weekly rows to demand_panel")
-    import pandas as pd
-    from datetime import date, timedelta
-
+    # Step 4: Append new rows to tc_demand_panel
+    logger.info("[PIPELINE] Step 4/5 — Append new weekly rows to tc_demand_panel")
     new_weeks_added = 0
-    conn2 = get_conn()
     try:
         from src.ingestion.calendar_build import build_calendar
-        from src.ingestion.economic_ingest import fetch_worldbank
         cal = build_calendar(cfg)
         econ = pd.read_csv(econ_path, parse_dates=["week_start"])
 
-        # Find all weeks after latest_week in weather data
         weather_dir = cfg["paths"]["raw_weather"]
         first_depot = cfg["depots"][0]
         fname = first_depot["name"].lower().replace(" ", "_") + ".csv"
         w_df = pd.read_csv(os.path.join(weather_dir, fname), parse_dates=["week_start"])
         new_weather_weeks = w_df[w_df["week_start"] > pd.Timestamp(latest_week)]["week_start"]
 
-        with conn2.cursor() as cur:
-            cur.execute("SELECT name, depot_id FROM depots")
-            depot_map = {r[0]: r[1] for r in cur.fetchall()}
+        depot_result = sb.table("tc_depots").select("name,depot_id").execute()
+        depot_map = {r["name"]: r["depot_id"] for r in depot_result.data}
 
-        import psycopg2.extras
         new_rows = []
         for new_week in sorted(new_weather_weeks):
             cal_row = cal[cal["week_start"] == new_week]
@@ -205,7 +203,7 @@ def run_update(cfg: dict) -> None:
 
                 row = {
                     "depot_id": depot_id,
-                    "week_start": new_week.date(),
+                    "week_start": new_week.date().isoformat(),
                     "data_source": "augmented",
                 }
                 if not week_weather.empty:
@@ -225,32 +223,13 @@ def run_update(cfg: dict) -> None:
                 new_rows.append(row)
 
         if new_rows:
-            conn3 = get_conn()
-            try:
-                with conn3.cursor() as cur:
-                    psycopg2.extras.execute_values(
-                        cur,
-                        """INSERT INTO demand_panel (depot_id, week_start, data_source,
-                               precip_sum, rain_sum, temp_mean, humidity_mean, cloud_cover_mean,
-                               is_sw_monsoon, is_ne_monsoon, is_dry_season,
-                               is_sinhala_tamil_new_year, is_vesak, is_christmas_week,
-                               post_holiday_lag_1, post_holiday_lag_2, is_year_end_quarter,
-                               gdp_lka, lending_rate, govt_consumption)
-                           VALUES %s ON CONFLICT (depot_id, week_start) DO NOTHING""",
-                        [tuple(r.get(k) for k in [
-                            "depot_id", "week_start", "data_source",
-                            "precip_sum", "rain_sum", "temp_mean", "humidity_mean", "cloud_cover_mean",
-                            "is_sw_monsoon", "is_ne_monsoon", "is_dry_season",
-                            "is_sinhala_tamil_new_year", "is_vesak", "is_christmas_week",
-                            "post_holiday_lag_1", "post_holiday_lag_2", "is_year_end_quarter",
-                            "gdp_lka", "lending_rate", "govt_consumption",
-                        ]) for r in new_rows],
-                        page_size=200,
-                    )
-                conn3.commit()
-                new_weeks_added = len(set(r["week_start"] for r in new_rows))
-            finally:
-                release_conn(conn3)
+            batch_size = 200
+            for i in range(0, len(new_rows), batch_size):
+                sb.table("tc_demand_panel").upsert(
+                    new_rows[i : i + batch_size],
+                    on_conflict="depot_id,week_start",
+                ).execute()
+            new_weeks_added = len(set(r["week_start"] for r in new_rows))
 
     except Exception as e:
         logger.error("[PIPELINE] update step 4 failed: %s", e)
@@ -282,43 +261,35 @@ def run_train(cfg: dict) -> None:
     # Step 2–4: Rolling CV + XGBoost training + MLflow logging
     logger.info("[PIPELINE] Step 2/5 — Run rolling-window CV and train XGBoost models")
     from src.model.train import train_all_horizons
-    from src.db.db import get_conn, release_conn
+    from src.db.db import get_client
 
-    # Create a retrain_log row for this manual run
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO retrain_log (triggered_by, trigger_reason, status) "
-                "VALUES ('pipeline_cli', '--mode train', 'running') RETURNING id"
-            )
-            retrain_id = cur.fetchone()[0]
-        conn.commit()
-    finally:
-        release_conn(conn)
+    sb = get_client()
+    log_row = sb.table("tc_retrain_log").insert({
+        "triggered_by": "pipeline_cli",
+        "trigger_reason": "--mode train",
+        "status": "running",
+    }).execute()
+    retrain_id = log_row.data[0]["id"]
 
     result = train_all_horizons(cfg, retrain_id=retrain_id)
 
-    # Step 5: Evaluate + save plots
+    # Step 3: Evaluate + save plots
     logger.info("[PIPELINE] Step 3/5 — Evaluate model and save plots")
     from src.model.evaluate import run_evaluation
-    eval_result = run_evaluation(result, df, retrain_id, cfg)
+    run_evaluation(result, df, retrain_id, cfg)
 
     # Step 4: Write retrain_log
     logger.info("[PIPELINE] Step 4/5 — Update retrain_log")
-    conn2 = get_conn()
-    try:
-        with conn2.cursor() as cur:
-            cur.execute("SELECT MAX(week_start) FROM demand_panel")
-            latest_week = cur.fetchone()[0]
-            cur.execute(
-                """UPDATE retrain_log SET status='completed', mape_after=%s,
-                       promoted=%s, training_data_up_to=%s WHERE id=%s""",
-                (result["overall_mape"], result["promoted"], latest_week, retrain_id),
-            )
-        conn2.commit()
-    finally:
-        release_conn(conn2)
+    latest_result = sb.table("tc_demand_panel").select("week_start").order(
+        "week_start", desc=True
+    ).limit(1).execute()
+    latest_week = latest_result.data[0]["week_start"] if latest_result.data else None
+    sb.table("tc_retrain_log").update({
+        "status": "completed",
+        "mape_after": result["overall_mape"],
+        "promoted": result["promoted"],
+        "training_data_up_to": latest_week,
+    }).eq("id", retrain_id).execute()
 
     # Step 5: Print summary
     logger.info("[PIPELINE] Step 5/5 — Summary")
@@ -388,7 +359,8 @@ def main():
     )
     args = parser.parse_args()
 
-    _require_env("DATABASE_URL")
+    _require_env("SUPABASE_URL")
+    _require_env("SUPABASE_KEY")
 
     cfg = load_config()
 

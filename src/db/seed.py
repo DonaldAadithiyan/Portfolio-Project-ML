@@ -1,41 +1,49 @@
 import logging
+import math
+
 import pandas as pd
-import psycopg2.extras
-from src.db.db import get_conn, release_conn
+
+from src.db.db import get_client
 
 logger = logging.getLogger(__name__)
 
 
-def seed_depots(depots_cfg: list[dict]) -> dict[str, int]:
-    """Insert depot rows (idempotent). Returns {name: depot_id} map."""
-    conn = get_conn()
+def _clean(val):
+    """Convert NaN/inf to None for JSON serialisation."""
+    if val is None:
+        return None
     try:
-        with conn.cursor() as cur:
-            for d in depots_cfg:
-                cur.execute(
-                    """
-                    INSERT INTO depots (name, district, province, latitude, longitude, pop_weight)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (name) DO NOTHING
-                    """,
-                    (d["name"], d["district"], d["province"],
-                     d["lat"], d["lon"], d["pop_weight"]),
-                )
-            conn.commit()
-            cur.execute("SELECT name, depot_id FROM depots")
-            rows = cur.fetchall()
-        depot_map = {r[0]: r[1] for r in rows}
-        logger.info("[SEED] Depots seeded: %d", len(depot_map))
-        return depot_map
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        release_conn(conn)
+        if math.isnan(val) or math.isinf(val):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return val
+
+
+def seed_depots(depots_cfg: list[dict]) -> dict[str, int]:
+    """Upsert depot rows (idempotent). Returns {name: depot_id} map."""
+    sb = get_client()
+    rows = [
+        {
+            "name": d["name"],
+            "district": d.get("district"),
+            "province": d.get("province"),
+            "latitude": d["lat"],
+            "longitude": d["lon"],
+            "pop_weight": d["pop_weight"],
+        }
+        for d in depots_cfg
+    ]
+    sb.table("tc_depots").upsert(rows, on_conflict="name").execute()
+
+    result = sb.table("tc_depots").select("name,depot_id").execute()
+    depot_map = {r["name"]: r["depot_id"] for r in result.data}
+    logger.info("[SEED] Depots seeded: %d", len(depot_map))
+    return depot_map
 
 
 def seed_demand_panel(panel_path: str, depot_map: dict[str, int]) -> int:
-    """Bulk-insert panel rows into demand_panel. Idempotent (ON CONFLICT DO NOTHING)."""
+    """Bulk-upsert panel rows into tc_demand_panel. Idempotent (ON CONFLICT DO NOTHING)."""
     df = pd.read_csv(panel_path, parse_dates=["week_start"])
     df["depot_id"] = df["depot"].map(depot_map)
 
@@ -51,37 +59,31 @@ def seed_demand_panel(panel_path: str, depot_map: dict[str, int]) -> int:
         "is_sinhala_tamil_new_year", "is_vesak", "is_christmas_week",
         "post_holiday_lag_1", "post_holiday_lag_2", "is_year_end_quarter",
     ]
-    # fill missing optional columns with None
     for c in col_order:
         if c not in df.columns:
             df[c] = None
 
-    records = [tuple(row) for row in df[col_order].itertuples(index=False, name=None)]
+    sb = get_client()
+    records = []
+    for _, row in df[col_order].iterrows():
+        rec = {}
+        for col in col_order:
+            val = row[col]
+            if col == "week_start":
+                rec[col] = val.date().isoformat() if hasattr(val, "date") else str(val)
+            else:
+                rec[col] = _clean(float(val) if pd.notna(val) else None)
+        records.append(rec)
 
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            psycopg2.extras.execute_values(
-                cur,
-                """
-                INSERT INTO demand_panel
-                    (depot_id, week_start, demand_tonnes, sales_tonnes, production_tonnes,
-                     precip_sum, rain_sum, temp_mean, humidity_mean, cloud_cover_mean,
-                     gdp_lka, lending_rate, cbsl_pmi_construction, govt_consumption,
-                     is_sw_monsoon, is_ne_monsoon, is_dry_season,
-                     is_sinhala_tamil_new_year, is_vesak, is_christmas_week,
-                     post_holiday_lag_1, post_holiday_lag_2, is_year_end_quarter)
-                VALUES %s
-                ON CONFLICT (depot_id, week_start) DO NOTHING
-                """,
-                records,
-                page_size=500,
-            )
-        conn.commit()
-        logger.info("[SEED] demand_panel rows inserted: %d", len(records))
-        return len(records)
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        release_conn(conn)
+    batch_size = 500
+    inserted = 0
+    for i in range(0, len(records), batch_size):
+        batch = records[i : i + batch_size]
+        sb.table("tc_demand_panel").upsert(
+            batch, on_conflict="depot_id,week_start"
+        ).execute()
+        inserted += len(batch)
+        logger.info("[SEED] demand_panel progress: %d / %d", inserted, len(records))
+
+    logger.info("[SEED] demand_panel rows upserted: %d", len(records))
+    return len(records)

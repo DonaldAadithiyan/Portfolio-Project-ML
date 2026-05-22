@@ -13,7 +13,6 @@ pyyaml
 python-dotenv
 matplotlib
 seaborn
-psycopg2-binary
-sqlalchemy
+supabase
 wbgapi
 openpyxl

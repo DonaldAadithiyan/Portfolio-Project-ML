@@ -128,27 +128,28 @@ def rebuild_lag_features_for_depots(depots: list[str], cfg: dict) -> pd.DataFram
     Reload the panel from DB, rebuild lag features for specified depots.
     Used by the retraining path after new sales_actuals rows are inserted.
     """
-    from src.db.db import get_conn, release_conn
-    conn = get_conn()
-    try:
-        query = """
-            SELECT dp.week_start, de.name AS depot, dp.demand_tonnes,
-                   dp.precip_sum, dp.rain_sum, dp.temp_mean, dp.humidity_mean,
-                   dp.cloud_cover_mean, dp.gdp_lka, dp.lending_rate,
-                   dp.cbsl_pmi_construction, dp.govt_consumption,
-                   dp.is_sw_monsoon, dp.is_ne_monsoon, dp.is_dry_season,
-                   dp.is_sinhala_tamil_new_year, dp.is_vesak, dp.is_christmas_week,
-                   dp.post_holiday_lag_1, dp.post_holiday_lag_2, dp.is_year_end_quarter,
-                   dp.data_source
-            FROM demand_panel dp
-            JOIN depots de ON dp.depot_id = de.depot_id
-            ORDER BY de.name, dp.week_start
-        """
-        df = pd.read_sql(query, conn)
-    finally:
-        release_conn(conn)
+    from src.db.db import get_client
+
+    sb = get_client()
+
+    # Fetch all demand panel rows
+    result = sb.table("tc_demand_panel").select(
+        "week_start,depot_id,demand_tonnes,precip_sum,rain_sum,temp_mean,"
+        "humidity_mean,cloud_cover_mean,gdp_lka,lending_rate,"
+        "cbsl_pmi_construction,govt_consumption,is_sw_monsoon,is_ne_monsoon,"
+        "is_dry_season,is_sinhala_tamil_new_year,is_vesak,is_christmas_week,"
+        "post_holiday_lag_1,post_holiday_lag_2,is_year_end_quarter,data_source"
+    ).execute()
+    df = pd.DataFrame(result.data)
+
+    # Fetch depot id→name map and join
+    depots_result = sb.table("tc_depots").select("depot_id,name").execute()
+    depot_map = {r["depot_id"]: r["name"] for r in depots_result.data}
+    df["depot"] = df["depot_id"].map(depot_map)
+    df = df.drop(columns=["depot_id"])
 
     df["week_start"] = pd.to_datetime(df["week_start"])
+    df = df.sort_values(["depot", "week_start"]).reset_index(drop=True)
     df = _add_lag_features(df, cfg)
 
     if "precip_sum" in df.columns and "is_sw_monsoon" in df.columns:

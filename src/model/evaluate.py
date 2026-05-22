@@ -9,11 +9,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import psycopg2.extras
 import shap
 import xgboost as xgb
 
-from src.db.db import get_conn, release_conn
+from src.db.db import get_client
 
 logger = logging.getLogger(__name__)
 
@@ -33,34 +32,22 @@ def _save_plot_to_db(
     b64: str,
     depot_id: Optional[int] = None,
 ) -> None:
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO model_plots (retrain_id, plot_type, depot_id, image_data)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (retrain_id, plot_type, depot_id) DO UPDATE
-                    SET image_data = EXCLUDED.image_data, created_at = NOW()
-                """,
-                (retrain_id, plot_type, depot_id, f"data:image/png;base64,{b64}"),
-            )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        release_conn(conn)
+    sb = get_client()
+    sb.table("tc_model_plots").upsert(
+        {
+            "retrain_id": retrain_id,
+            "plot_type": plot_type,
+            "depot_id": depot_id,
+            "image_data": f"data:image/png;base64,{b64}",
+        },
+        on_conflict="retrain_id,plot_type,depot_id",
+    ).execute()
 
 
 def _get_depot_id_map() -> dict[str, int]:
-    conn = get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT name, depot_id FROM depots")
-            return {r[0]: r[1] for r in cur.fetchall()}
-    finally:
-        release_conn(conn)
+    sb = get_client()
+    result = sb.table("tc_depots").select("name,depot_id").execute()
+    return {r["name"]: r["depot_id"] for r in result.data}
 
 
 # ── Individual plot generators ────────────────────────────────
@@ -205,15 +192,11 @@ def plot_depot_forecast(
 
 
 def plot_retrain_history(retrain_id: int) -> None:
-    conn = get_conn()
-    try:
-        df = pd.read_sql(
-            "SELECT triggered_at, mape_before, mape_after FROM retrain_log "
-            "WHERE status='completed' ORDER BY triggered_at",
-            conn,
-        )
-    finally:
-        release_conn(conn)
+    sb = get_client()
+    result = sb.table("tc_retrain_log").select(
+        "triggered_at,mape_before,mape_after"
+    ).eq("status", "completed").order("triggered_at").execute()
+    df = pd.DataFrame(result.data)
 
     if df.empty:
         return
