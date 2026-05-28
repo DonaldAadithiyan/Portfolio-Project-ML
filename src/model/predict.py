@@ -43,6 +43,7 @@ def _build_feature_row(
     # The lag features are computed from the tail of recent_panel.
     panel = recent_panel.sort_values("week_start").copy()
     panel["week_start"] = pd.to_datetime(panel["week_start"])
+    panel["demand_tonnes"] = pd.to_numeric(panel["demand_tonnes"], errors="coerce")
 
     # Last row is the most recent week — as_of_date context
     last = panel.iloc[-1]
@@ -76,7 +77,10 @@ def _build_feature_row(
     ]
     for col in carry_cols:
         if col in last.index:
-            row[col] = last[col]
+            try:
+                row[col] = float(last[col]) if last[col] is not None else np.nan
+            except (TypeError, ValueError):
+                row[col] = np.nan
 
     # Interaction features
     precip = row.get("precip_sum", 0) or 0
