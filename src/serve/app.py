@@ -103,7 +103,7 @@ def create_forecast(req: ForecastRequest, background_tasks: BackgroundTasks):
             "horizon_weeks": fc["horizon"],
             "forecast_week": fc["forecast_week"].isoformat(),
             "demand_forecast": fc["demand_tonnes"],
-        }, on_conflict="depot_id,as_of_date,horizon_weeks").execute()
+        }, on_conflict="depot_id,forecast_week").execute()
 
     background_tasks.add_task(_run_alert_evaluation, depot_id, forecasts)
     background_tasks.add_task(_run_po_generation, depot_id, forecasts, req.as_of_date)
