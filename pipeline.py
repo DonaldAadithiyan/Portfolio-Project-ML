@@ -477,7 +477,8 @@ def run_serve(cfg: dict) -> None:
     import uvicorn
 
     host = os.environ.get("API_HOST", cfg["api"]["host"])
-    port = int(os.environ.get("API_PORT", cfg["api"]["port"]))
+    # Railway injects PORT; fall back to API_PORT, then config default
+    port = int(os.environ.get("PORT", os.environ.get("API_PORT", cfg["api"]["port"])))
 
     logger.info("[PIPELINE] Starting FastAPI on %s:%d", host, port)
     logger.info("[PIPELINE] Endpoints:")
